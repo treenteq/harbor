@@ -1,14 +1,27 @@
 import express, { Request, Response, RequestHandler } from "express";
 import { Scraper } from "agent-twitter-client";
 import dotenv from "dotenv";
+import cors from "cors";
 
 dotenv.config();
 
 const app = express();
+
+const apiRoute = "/v1";
 const port = process.env.PORT || 3000;
 
 const scraper = new Scraper();
 
+// CORS configuration
+const corsOptions = {
+    origin: process.env.ALLOWED_ORIGINS?.split(",") || "*",
+    methods: ["GET", "POST"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+    credentials: true,
+    optionsSuccessStatus: 204,
+};
+
+app.use(cors(corsOptions));
 app.use(express.json());
 
 interface ScrapingResponse {
@@ -116,8 +129,9 @@ const scrapeTweets: RequestHandler<
     }
 };
 
-app.get("/health", healthCheck);
-app.post("/scrape", scrapeTweets);
+app.get("/", healthCheck);
+app.get(`${apiRoute}/health`, healthCheck);
+app.post(`${apiRoute}/scrape`, scrapeTweets);
 
 const startServer = async () => {
     try {
