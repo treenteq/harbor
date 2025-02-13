@@ -1,16 +1,15 @@
-import express, { Request, Response, RequestHandler } from "express";
-import { Scraper } from "agent-twitter-client";
+import express from "express";
 import dotenv from "dotenv";
 import cors from "cors";
+import twitterRouter, { scraper } from "./routes/twitterRoute";
+import dataRouter from "./routes/dataRoute";
+import apiKeyRouter from "./routes/apiKeyRoute";
 
 dotenv.config();
 
 const app = express();
-
 const apiRoute = "/v1";
 const port = process.env.PORT || 3000;
-
-const scraper = new Scraper();
 
 // CORS configuration
 const corsOptions = {
@@ -24,16 +23,27 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.use(express.json());
 
-interface ScrapingResponse {
-    username: string;
-    tweets: any[];
-    success: boolean;
-    message?: string;
-}
+// Health check endpoint
+app.get("/", (_req, res) => {
+    res.status(200).json({
+        status: "healthy",
+        timestamp: new Date().toISOString(),
+        environment: process.env.NODE_ENV || "development",
+    });
+});
 
-interface ScrapingRequest {
-    username: string;
-}
+app.get(`${apiRoute}/health`, (_req, res) => {
+    res.status(200).json({
+        status: "healthy",
+        timestamp: new Date().toISOString(),
+        environment: process.env.NODE_ENV || "development",
+    });
+});
+
+// Routes
+app.use(`${apiRoute}/twitter`, twitterRouter);
+app.use(`${apiRoute}/data`, dataRouter);
+app.use(`${apiRoute}/api-keys`, apiKeyRouter);
 
 function validateEnv(): void {
     const requiredEnvVars = {
@@ -59,7 +69,6 @@ function validateEnv(): void {
 async function initializeTwitter() {
     try {
         validateEnv();
-
         await scraper.login(
             process.env.TWITTER_USERNAME!,
             process.env.TWITTER_PASSWORD!,
@@ -71,67 +80,6 @@ async function initializeTwitter() {
         process.exit(1);
     }
 }
-
-const healthCheck: RequestHandler = (_req, res) => {
-    res.status(200).json({
-        status: "healthy",
-        timestamp: new Date().toISOString(),
-        environment: process.env.NODE_ENV || "development",
-    });
-};
-
-const scrapeTweets: RequestHandler<
-    {},
-    ScrapingResponse,
-    ScrapingRequest
-> = async (req, res) => {
-    const { username } = req.body;
-
-    if (!username) {
-        res.status(400).json({
-            username: "",
-            tweets: [],
-            success: false,
-            message: "Username is required",
-        });
-        return;
-    }
-
-    try {
-        const tweets: any[] = [];
-        const tweetGenerator = scraper.getTweetsAndReplies(username);
-
-        for await (const tweet of tweetGenerator) {
-            tweets.push(tweet);
-        }
-
-        const response: ScrapingResponse = {
-            username,
-            tweets,
-            success: true,
-        };
-
-        res.status(200).json(response);
-    } catch (error) {
-        console.error(`Error scraping tweets for ${username}:`, error);
-
-        const response: ScrapingResponse = {
-            username,
-            tweets: [],
-            success: false,
-            message:
-                error instanceof Error
-                    ? error.message
-                    : "An unknown error occurred",
-        };
-
-        res.status(500).json(response);
-    }
-};
-
-app.get("/", healthCheck);
-app.get(`${apiRoute}/health`, healthCheck);
-app.post(`${apiRoute}/scrape`, scrapeTweets);
 
 const startServer = async () => {
     try {
