@@ -65,6 +65,10 @@ model ApiKey {
   updatedAt   DateTime  @updatedAt
   isActive    Boolean   @default(true)
   permissions String[]
+  publicKey          String?
+  encryptedPrivateKey String?
+  keyPairIV           String?
+  keyPairAuthTag      String?
 
   @@index([key])
 }
