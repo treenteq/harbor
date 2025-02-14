@@ -3,6 +3,7 @@ import { PrismaClient } from "@prisma/client";
 import { z } from "zod";
 import rateLimit from "express-rate-limit";
 import crypto from "crypto";
+import { generateEthereumKeyPair, encryptData } from "../utils/crypto";
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -68,11 +69,18 @@ router.post(
                 req.body
             );
 
+            // Generate API key
             const apiKey = `pk_${crypto.randomBytes(32).toString("hex")}`;
             const hashedKey = crypto
                 .createHash("sha256")
                 .update(apiKey)
                 .digest("hex");
+
+            // Generate Ethereum keypair
+            const { address, privateKey } = generateEthereumKeyPair();
+
+            // Encrypt private key
+            const encryptedPrivateKey = encryptData(privateKey);
 
             const newApiKey = await prisma.apiKey.create({
                 data: {
@@ -81,6 +89,11 @@ router.post(
                     userId: req.userId!,
                     expiresAt: expiresAt ? new Date(expiresAt) : null,
                     permissions,
+                    // Store Ethereum keypair
+                    publicKey: address,
+                    encryptedPrivateKey: encryptedPrivateKey.encryptedData,
+                    keyPairIV: encryptedPrivateKey.iv,
+                    keyPairAuthTag: encryptedPrivateKey.authTag,
                 },
             });
 
@@ -91,8 +104,10 @@ router.post(
                 name: newApiKey.name,
                 expiresAt: newApiKey.expiresAt,
                 permissions: newApiKey.permissions,
+                publicKey: address, // Include the Ethereum address in the response
             });
         } catch (error) {
+            console.error("Error creating API key:", error);
             res.status(400).json({ error: "Invalid request" });
         }
     }
@@ -114,6 +129,7 @@ router.get(
                 createdAt: true,
                 isActive: true,
                 permissions: true,
+                publicKey: true,
             },
         });
 
@@ -121,6 +137,7 @@ router.get(
     }
 );
 
+// Update the delete route to ensure keypair is deleted
 router.delete(
     "/:id",
     authenticateUser,
@@ -138,13 +155,16 @@ router.delete(
                 return;
             }
 
+            // The keypair will be automatically deleted due to CASCADE delete
             await prisma.apiKey.delete({
                 where: {
                     id: req.params.id,
                 },
             });
 
-            res.json({ message: "API key deleted successfully" });
+            res.json({
+                message: "API key and associated keypair deleted successfully",
+            });
         } catch (error) {
             res.status(500).json({ error: "Failed to delete API key" });
         }
