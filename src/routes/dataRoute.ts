@@ -40,6 +40,15 @@ declare global {
     }
 }
 
+type DatasetMetadata = [
+    name: string,
+    description: string,
+    contentHash: string,
+    ipfsHash: string,
+    currentPrice: bigint,
+    tags: string[]
+];
+
 // Middleware to validate API key and attach wallet info
 const validateApiKeyMiddleware = async (
     req: Request,
@@ -126,8 +135,8 @@ router.get(
                     address: DATASET_CONTRACT_ADDRESS,
                     abi: DatasetTokenABI,
                     functionName: "getDatasetMetadata",
-                    args: [tokenId],
-                })) as [string, string, string, string, bigint];
+                    args: [BigInt(tokenId)],
+                })) as DatasetMetadata;
 
                 const tags = (await publicClient.readContract({
                     address: DATASET_CONTRACT_ADDRESS,
@@ -201,37 +210,42 @@ router.post(
 
         try {
             const wallet = req.wallet!;
-
-            // Check balance
             const balance = await publicClient.getBalance({
                 address: wallet.address,
             });
 
-            // Calculate total price
             let totalPrice = BigInt(0);
             const datasetsToProcess = [];
 
             for (const tokenId of tokenIds) {
-                // Check if user already owns the dataset
-                const userBalance = (await publicClient.readContract({
-                    address: DATASET_CONTRACT_ADDRESS,
-                    abi: DatasetTokenABI,
-                    functionName: "balanceOf",
-                    args: [wallet.address, BigInt(tokenId)],
-                })) as bigint;
+                const [userBalance, hasPurchased] = await Promise.all([
+                    publicClient.readContract({
+                        address: DATASET_CONTRACT_ADDRESS,
+                        abi: DatasetTokenABI,
+                        functionName: "balanceOf",
+                        args: [wallet.address, BigInt(tokenId)],
+                    }) as Promise<bigint>,
+                    publicClient.readContract({
+                        address: DATASET_CONTRACT_ADDRESS,
+                        abi: DatasetTokenABI,
+                        functionName: "hasPurchased",
+                        args: [wallet.address, BigInt(tokenId)],
+                    }) as Promise<boolean>,
+                ]);
 
-                if (userBalance > BigInt(0)) {
-                    // User already owns this dataset
+                if (userBalance > BigInt(0) || hasPurchased) {
                     const metadata = (await publicClient.readContract({
                         address: DATASET_CONTRACT_ADDRESS,
                         abi: DatasetTokenABI,
                         functionName: "getDatasetMetadata",
                         args: [BigInt(tokenId)],
-                    })) as [string, string, string, string, bigint];
+                    })) as DatasetMetadata;
 
                     datasetsToProcess.push({
                         tokenId,
                         ipfsHash: metadata[3],
+                        name: metadata[0],
+                        description: metadata[1],
                         owned: true,
                     });
                 } else {
@@ -241,7 +255,7 @@ router.post(
                         abi: DatasetTokenABI,
                         functionName: "getDatasetMetadata",
                         args: [BigInt(tokenId)],
-                    })) as [string, string, string, string, bigint];
+                    })) as DatasetMetadata;
 
                     totalPrice += metadata[4];
                     datasetsToProcess.push({
@@ -266,15 +280,12 @@ router.post(
             const results = [];
             for (const dataset of datasetsToProcess) {
                 if (!dataset.owned) {
-                    console.log("Wallet: ", wallet);
                     // Decrypt private key
                     const privateKey = decryptData(
                         wallet.encryptedPrivateKey,
                         wallet.keyPairIV,
                         wallet.keyPairAuthTag
                     );
-
-                    console.log(privateKey);
 
                     // Add '0x' prefix if missing and cast to the correct type
                     const formattedPrivateKey = (
@@ -293,19 +304,6 @@ router.post(
                         transport: http(RPC_URL),
                     });
 
-                    // // Create wallet client for transaction
-                    // const walletClient = createWalletClient({
-                    //     account: privateKeyToAccount(
-                    //         privateKey
-                    //     ) as `0x${string}`,
-                    //     chain: baseSepolia,
-                    //     transport: http(RPC_URL),
-                    // });
-
-                    console.log(
-                        "asdasdasdsasdasdjaskdhasjkdhakjsdhakjdhkjahdkjasdhasjdasjdhaskjd"
-                    );
-
                     // Purchase dataset
                     const hash = await walletClient.writeContract({
                         address: DATASET_CONTRACT_ADDRESS,
@@ -315,23 +313,75 @@ router.post(
                         value: dataset.price,
                     });
 
-                    console.log(
-                        "asdasdasdsasdasdjaskdhasjkdhakjsdhakjdhkjahdkjasdhasjdasjdhaskjd"
-                    );
-
                     await publicClient.waitForTransactionReceipt({ hash });
                 }
 
-                // Fetch dataset from IPFS
-                const downloadUrl = await getFromPinata(dataset.ipfsHash);
-                const response = await fetch(downloadUrl);
-                const data = await response.json();
+                try {
+                    // Fetch dataset from IPFS
+                    const downloadUrl = await getFromPinata(dataset.ipfsHash);
+                    const response = await fetch(downloadUrl);
 
-                results.push({
-                    tokenId: dataset.tokenId,
-                    data,
-                    purchased: !dataset.owned,
-                });
+                    // Check content type from response headers
+                    const contentType = response.headers.get("content-type");
+
+                    let data: any;
+                    if (contentType?.includes("application/json")) {
+                        // Handle JSON data
+                        data = await response.json();
+                    } else if (
+                        contentType?.includes("text/csv") ||
+                        dataset.name?.toLowerCase().includes(".csv")
+                    ) {
+                        // Handle CSV data
+                        const text = await response.text();
+                        data = {
+                            type: "csv",
+                            content: text,
+                        };
+                    } else if (
+                        contentType?.includes(
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        ) ||
+                        contentType?.includes("application/vnd.ms-excel") ||
+                        dataset.name?.toLowerCase().includes(".xlsx")
+                    ) {
+                        // Handle Excel data
+                        const buffer = await response.arrayBuffer();
+                        data = {
+                            type: "excel",
+                            content: Buffer.from(buffer).toString("base64"),
+                        };
+                    } else {
+                        // Default to raw buffer if type is unknown
+                        const buffer = await response.arrayBuffer();
+                        data = {
+                            type: "binary",
+                            content: Buffer.from(buffer).toString("base64"),
+                            contentType:
+                                contentType || "application/octet-stream",
+                        };
+                    }
+
+                    results.push({
+                        tokenId: dataset.tokenId,
+                        data,
+                        purchased: !dataset.owned,
+                        metadata: {
+                            name: dataset.name,
+                            description: dataset.description,
+                        },
+                    });
+                } catch (error: any) {
+                    console.error(
+                        `Error processing dataset ${dataset.tokenId}:`,
+                        error
+                    );
+                    results.push({
+                        tokenId: dataset.tokenId,
+                        error: `Failed to process dataset: ${error.message}`,
+                        purchased: !dataset.owned,
+                    });
+                }
             }
 
             res.json({
